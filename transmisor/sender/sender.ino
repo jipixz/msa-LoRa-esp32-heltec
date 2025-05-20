@@ -16,7 +16,7 @@ void setup() {
   //analogSetAttenuation(ADC_11db); // Configura la atenuación para medir hasta ~3.3V
   RADIOLIB_OR_HALT(radio.begin());
   RADIOLIB_OR_HALT(radio.setFrequency(905.2)); // Ajusta según tu región
-  RADIOLIB_OR_HALT(radio.setOutputPower(10));  // Potencia de transmisión en dBm
+  RADIOLIB_OR_HALT(radio.setOutputPower(22));  // Potencia de transmisión en dBm
   RADIOLIB_OR_HALT(radio.setSpreadingFactor(12));
   RADIOLIB_OR_HALT(radio.setBandwidth(250.0));
 }

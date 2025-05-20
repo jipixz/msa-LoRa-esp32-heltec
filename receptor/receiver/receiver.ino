@@ -27,7 +27,7 @@ void loop() {
     rxFlag = false;
     radio.readData(receivedData);
     if (_radiolib_status == RADIOLIB_ERR_NONE) {
-      both.print("Mensaje recibido: ");
+      both.print("RX: ");
       both.println(receivedData);
       both.print("RSSI: ");
       both.print(radio.getRSSI());
