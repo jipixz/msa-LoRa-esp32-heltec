@@ -61,7 +61,7 @@ void procesarDatos(String datos) {
   both.println(datos);
   
   // Enviar al backend via Serial
-  Serial.print("Humedad: ");
+  /* Serial.print("Humedad: ");
   Serial.print(medidas.humedad);
   Serial.print("% | TempDS: ");
   Serial.print(medidas.tempDS, 1);
@@ -71,7 +71,7 @@ void procesarDatos(String datos) {
   Serial.print(medidas.presion, 1);
   Serial.print("hPa | HumAire: ");
   Serial.print(medidas.humAire, 1);
-  Serial.println("%");
+  Serial.println("%"); */
 }
 
 SensorData parsearDatos(String datos) {
