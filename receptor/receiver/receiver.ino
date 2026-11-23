@@ -17,6 +17,15 @@ void rxCallback() {
   rxFlag = true;
 }
 
+// Definir pines de LEDs
+const int LED_BLANCO = 35;
+const int LED_NARANJA = 1;
+
+// Variables para PWM
+const int pwmChannel = 0;
+const int pwmFreq = 5000;
+const int pwmResolution = 8;
+
 void setup() {
   heltec_setup();
   Serial.begin(115200);  // Inicializar Serial para el backend
@@ -26,6 +35,11 @@ void setup() {
   RADIOLIB_OR_HALT(radio.setFrequency(905.2));
   RADIOLIB_OR_HALT(radio.setSpreadingFactor(12));
   RADIOLIB_OR_HALT(radio.setBandwidth(250.0));
+
+  RADIOLIB_OR_HALT(radio.setCodingRate(8));        // Máxima redundancia - IGUAL AL TX
+  RADIOLIB_OR_HALT(radio.setCurrentLimit(140));    // Para recepción óptima
+  RADIOLIB_OR_HALT(radio.setPreambleLength(12));   // DEBE COINCIDIR con TX
+  RADIOLIB_OR_HALT(radio.setCRC(true));            // DEBE COINCIDIR con TX
   
   radio.setDio1Action(rxCallback);
   RADIOLIB_OR_HALT(radio.startReceive());
@@ -55,6 +69,9 @@ void loop() {
 
 void procesarDatos(String datos) {
   SensorData medidas = parsearDatos(datos);
+
+  // Controlar LEDs basado en datos recibidos
+  controlarLEDs(medidas);
   
   // Mostrar en OLED
   both.println("Datos recibidos:");
@@ -71,14 +88,14 @@ void procesarDatos(String datos) {
   Serial.print(medidas.presion, 1);
   Serial.print("hPa | HumAire: ");
   Serial.print(medidas.humAire, 1);
-  Serial.println("%"); */
+  Serial.println("%"); */ 
 }
 
 SensorData parsearDatos(String datos) {
   SensorData result = {0, NAN, NAN, NAN, NAN};
   
   // Extraer humedad del suelo
-  int humStart = datos.indexOf("Humedad: ") + 9;
+  int humStart = datos.indexOf("HS:") + 9;
   int humEnd = datos.indexOf("%", humStart);
   if(humStart >= 0 && humEnd >= 0) {
     result.humedad = datos.substring(humStart, humEnd).toInt();
@@ -128,4 +145,43 @@ void mostrarMetricasRadio() {
   Serial.print(radio.getRSSI());
   Serial.print(",SNR:");
   Serial.println(radio.getSNR());
+}
+
+void controlarLEDs(SensorData medidas) {
+  // Ejemplo: LED blanco con brillo basado en humedad
+  int brillo = map(medidas.humedad, 0, 100, 0, 255);
+  ledcWrite(pwmChannel, brillo);
+  
+  // Ejemplo: LED naranja para alertas de temperatura
+  if(medidas.tempDS > 30.0) {
+    digitalWrite(LED_NARANJA, HIGH);  // Alerta temperatura alta
+  } else {
+    digitalWrite(LED_NARANJA, LOW);
+  }
+  
+  // Parpadeo para indicar recepción de datos
+  parpadearLED(LED_NARANJA, 3, 100);
+}
+
+void parpadearLED(int pin, int veces, int delay_ms) {
+  for(int i = 0; i < veces; i++) {
+    digitalWrite(pin, HIGH);
+    delay(delay_ms);
+    digitalWrite(pin, LOW);
+    delay(delay_ms);
+  }
+}
+
+// Función para efecto de respiración
+void efectoRespiracion(int pin) {
+  // Incrementar brillo
+  for(int i = 0; i <= 255; i++) {
+    ledcWrite(0, i);
+    delay(5);
+  }
+  // Decrementar brillo
+  for(int i = 255; i >= 0; i--) {
+    ledcWrite(0, i);
+    delay(5);
+  }
 }
