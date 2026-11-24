@@ -1,187 +1,207 @@
-// Código receptor optimizado para Heltec WiFi_LoRa_32_V3
+// Código receptor (gateway) para Heltec WiFi_LoRa_32_V3
+// Recibe los paquetes LoRa de los nodos y reenvía cada uno, en una sola línea,
+// por Serial al backend (msa-back, parseSensorData). Muestra un resumen en el OLED.
 #include <heltec_unofficial.h>
 
-volatile bool rxFlag = false;
-String receivedData;
-
-// Estructura para almacenar datos parseados
+// Datos parseados de un paquete. Mismo formato y claves que parseSensorData() de msa-back:
+//   "HS:45% | T1:25.3C | T2:26.1C | P:1008hPa | HA:80.2% | Lux:1234lx | Rain:0% | RainBool:NO | Nodo:0"
+// Un valor que no se pudo leer (o que viene como "nan") queda en NAN / -1.
 struct SensorData {
-  int humedad;
-  float tempDS;
-  float tempBME;
-  float presion;
-  float humAire;
+  float humedadSuelo = NAN;  // HS
+  float tempDS = NAN;        // T1
+  float tempBME = NAN;       // T2
+  float presion = NAN;       // P
+  float humAire = NAN;       // HA
+  float lux = NAN;           // Lux
+  float lluvia = NAN;        // Rain
+  int rainDigital = -1;      // RainBool: 1 = SI, 0 = NO, -1 = no vino
+  int nodo = -1;             // Nodo
 };
+// (El struct va antes de cualquier función: el IDE de Arduino inserta los prototipos
+//  automáticos justo antes de la primera función, y deben ver este tipo.)
+
+volatile bool rxFlag = false;
 
 void rxCallback() {
   rxFlag = true;
 }
 
-// Definir pines de LEDs
-const int LED_BLANCO = 35;
-const int LED_NARANJA = 1;
+// Pines de LEDs
+const int LED_BLANCO = 35;   // LED blanco de la placa: brillo según humedad del suelo
+const int LED_NARANJA = 1;   // LED externo: alerta de temperatura y parpadeo al recibir
 
-// Variables para PWM
-const int pwmChannel = 0;
+// PWM del LED blanco
 const int pwmFreq = 5000;
 const int pwmResolution = 8;
 
+// Alerta de temperatura del suelo (DS18B20)
+const float TEMP_ALERTA_C = 30.0;
+
+// Parpadeo del LED naranja sin bloquear el loop (la radio sigue recibiendo)
+const int PARPADEOS = 3;
+const unsigned long PARPADEO_MS = 100;
+int cambiosPendientes = 0;          // cada parpadeo son 2 cambios (encender y apagar)
+unsigned long ultimoCambio = 0;
+bool alertaTemperatura = false;
+
 void setup() {
   heltec_setup();
-  Serial.begin(115200);  // Inicializar Serial para el backend
-  
-  // Configuración de la radio LoRa
+
+  // LEDs
+  pinMode(LED_NARANJA, OUTPUT);
+  digitalWrite(LED_NARANJA, LOW);
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttach(LED_BLANCO, pwmFreq, pwmResolution);
+#else
+  ledcSetup(0, pwmFreq, pwmResolution);
+  ledcAttachPin(LED_BLANCO, 0);
+#endif
+  escribirLedBlanco(0);
+
+  // Configuración de la radio LoRa (debe coincidir con el emisor)
   RADIOLIB_OR_HALT(radio.begin());
   RADIOLIB_OR_HALT(radio.setFrequency(905.2));
   RADIOLIB_OR_HALT(radio.setSpreadingFactor(12));
   RADIOLIB_OR_HALT(radio.setBandwidth(250.0));
-
   RADIOLIB_OR_HALT(radio.setCodingRate(8));        // Máxima redundancia - IGUAL AL TX
   RADIOLIB_OR_HALT(radio.setCurrentLimit(140));    // Para recepción óptima
   RADIOLIB_OR_HALT(radio.setPreambleLength(12));   // DEBE COINCIDIR con TX
   RADIOLIB_OR_HALT(radio.setCRC(true));            // DEBE COINCIDIR con TX
-  
+
   radio.setDio1Action(rxCallback);
   RADIOLIB_OR_HALT(radio.startReceive());
-  
+
   both.println("Receptor listo. Esperando datos...");
 }
 
 void loop() {
   heltec_loop();
-  
+
   if (rxFlag) {
     rxFlag = false;
     String payload;
     RADIOLIB(radio.readData(payload));
-    
+
     if (_radiolib_status == RADIOLIB_ERR_NONE) {
       procesarDatos(payload);
-      mostrarMetricasRadio();
     } else {
       both.print("Error RX: ");
       both.println(_radiolib_status);
     }
-    
+
     RADIOLIB_OR_HALT(radio.startReceive());
   }
+
+  actualizarParpadeo();
 }
 
 void procesarDatos(String datos) {
-  SensorData medidas = parsearDatos(datos);
+  // Paquetes de firmware viejo traían "\nNodo: 0" en otra línea: se unen en una sola
+  datos.replace("\r", "");
+  datos.replace("\n", " | ");
+  datos.trim();
 
-  // Controlar LEDs basado en datos recibidos
-  controlarLEDs(medidas);
-  
-  // Mostrar en OLED
-  both.println("Datos recibidos:");
-  both.println(datos);
-  
-  // Enviar al backend via Serial
-  /* Serial.print("Humedad: ");
-  Serial.print(medidas.humedad);
-  Serial.print("% | TempDS: ");
-  Serial.print(medidas.tempDS, 1);
-  Serial.print("°C | TempBME: ");
-  Serial.print(medidas.tempBME, 1);
-  Serial.print("°C | Presion: ");
-  Serial.print(medidas.presion, 1);
-  Serial.print("hPa | HumAire: ");
-  Serial.print(medidas.humAire, 1);
-  Serial.println("%"); */ 
-}
+  // 1. Al backend: el paquete completo, una línea por paquete
+  Serial.println(datos);
 
-SensorData parsearDatos(String datos) {
-  SensorData result = {0, NAN, NAN, NAN, NAN};
-  
-  // Extraer humedad del suelo
-  int humStart = datos.indexOf("HS:") + 9;
-  int humEnd = datos.indexOf("%", humStart);
-  if(humStart >= 0 && humEnd >= 0) {
-    result.humedad = datos.substring(humStart, humEnd).toInt();
-  }
-  
-  // Extraer temperatura DS18B20
-  int tempDSStart = datos.indexOf("TempDS: ") + 8;
-  int tempDSEnd = datos.indexOf("°C", tempDSStart);
-  if(tempDSStart >= 0 && tempDSEnd >= 0) {
-    result.tempDS = datos.substring(tempDSStart, tempDSEnd).toFloat();
-  }
-  
-  // Extraer temperatura BME280
-  int tempBMEStart = datos.indexOf("TempBME: ") + 9;
-  int tempBMEEnd = datos.indexOf("°C", tempBMEStart);
-  if(tempBMEStart >= 0 && tempBMEEnd >= 0) {
-    result.tempBME = datos.substring(tempBMEStart, tempBMEEnd).toFloat();
-  }
-  
-  // Extraer presión
-  int presionStart = datos.indexOf("Presion: ") + 9;
-  int presionEnd = datos.indexOf("hPa", presionStart);
-  if(presionStart >= 0 && presionEnd >= 0) {
-    result.presion = datos.substring(presionStart, presionEnd).toFloat();
-  }
-  
-  // Extraer humedad del aire
-  int humAireStart = datos.indexOf("HumAire: ") + 9;
-  int humAireEnd = datos.indexOf("%", humAireStart);
-  if(humAireStart >= 0 && humAireEnd >= 0) {
-    result.humAire = datos.substring(humAireStart, humAireEnd).toFloat();
-  }
-  
-  return result;
-}
-
-void mostrarMetricasRadio() {
-  both.print("RSSI: ");
-  both.print(radio.getRSSI());
-  both.println(" dBm");
-  both.print("SNR: ");
-  both.print(radio.getSNR());
-  both.println(" dB");
-  
-  // Opcional: Enviar métricas al backend
+  // 2. Métricas de radio (el backend ignora esta línea)
+  float rssi = radio.getRSSI();
+  float snr = radio.getSNR();
   Serial.print("RSSI:");
-  Serial.print(radio.getRSSI());
+  Serial.print(rssi);
   Serial.print(",SNR:");
-  Serial.println(radio.getSNR());
+  Serial.println(snr);
+
+  // 3. Resumen en el OLED
+  SensorData m = parsearDatos(datos);
+  display.cls();
+  display.printf("Nodo %d  RSSI %.0f\n", m.nodo, rssi);
+  display.printf("Suelo %.0f%%  %.1fC\n", m.humedadSuelo, m.tempDS);
+  display.printf("Aire %.1fC %.0f%%\n", m.tempBME, m.humAire);
+  display.printf("%.0fhPa %.0flx\n", m.presion, m.lux);
+  display.printf("Lluvia %.0f%% %s\n", m.lluvia, m.rainDigital == 1 ? "SI" : (m.rainDigital == 0 ? "NO" : "?"));
+
+  controlarLEDs(m);
 }
 
-void controlarLEDs(SensorData medidas) {
-  // Ejemplo: LED blanco con brillo basado en humedad
-  int brillo = map(medidas.humedad, 0, 100, 0, 255);
-  ledcWrite(pwmChannel, brillo);
-  
-  // Ejemplo: LED naranja para alertas de temperatura
-  if(medidas.tempDS > 30.0) {
-    digitalWrite(LED_NARANJA, HIGH);  // Alerta temperatura alta
+// Quita la unidad final ("%", "C", "hPa", "lx") y convierte a número; "nan" o vacío -> NAN
+float aNumero(String valor) {
+  valor.trim();
+  valor.toLowerCase();
+  if (valor.length() == 0 || valor.startsWith("nan")) return NAN;
+  char c = valor.charAt(0);
+  if (!(isDigit(c) || c == '-' || c == '.')) return NAN;
+  return valor.toFloat();  // toFloat() se detiene en la unidad
+}
+
+SensorData parsearDatos(const String &datos) {
+  SensorData r;
+  int inicio = 0;
+
+  while (inicio <= (int)datos.length()) {
+    int fin = datos.indexOf('|', inicio);
+    if (fin < 0) fin = datos.length();
+    String parte = datos.substring(inicio, fin);
+    inicio = fin + 1;
+
+    int dosPuntos = parte.indexOf(':');
+    if (dosPuntos < 0) continue;
+    String clave = parte.substring(0, dosPuntos);
+    String valor = parte.substring(dosPuntos + 1);
+    clave.trim();
+    valor.trim();
+
+    if (clave == "HS")            r.humedadSuelo = aNumero(valor);
+    else if (clave == "T1")       r.tempDS = aNumero(valor);
+    else if (clave == "T2")       r.tempBME = aNumero(valor);
+    else if (clave == "P")        r.presion = aNumero(valor);
+    else if (clave == "HA")       r.humAire = aNumero(valor);
+    else if (clave == "Lux")      r.lux = aNumero(valor);
+    else if (clave == "Rain")     r.lluvia = aNumero(valor);
+    else if (clave == "RainBool") {
+      valor.toUpperCase();
+      r.rainDigital = (valor.indexOf("SI") >= 0 || valor == "1" || valor == "TRUE") ? 1 : 0;
+    }
+    else if (clave == "Nodo") {
+      float n = aNumero(valor);
+      r.nodo = isnan(n) ? -1 : (int)n;
+    }
+  }
+
+  return r;
+}
+
+void escribirLedBlanco(int brillo) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWrite(LED_BLANCO, brillo);
+#else
+  ledcWrite(0, brillo);
+#endif
+}
+
+void controlarLEDs(const SensorData &m) {
+  // LED blanco: brillo proporcional a la humedad del suelo (apagado si no vino)
+  int brillo = isnan(m.humedadSuelo) ? 0 : map((int)m.humedadSuelo, 0, 100, 0, 255);
+  escribirLedBlanco(constrain(brillo, 0, 255));
+
+  // LED naranja: encendido fijo si la temperatura del suelo pasa el umbral
+  alertaTemperatura = !isnan(m.tempDS) && m.tempDS > TEMP_ALERTA_C;
+
+  // Parpadeo para indicar recepción; al terminar queda en el estado de la alerta
+  cambiosPendientes = PARPADEOS * 2;
+  ultimoCambio = millis();
+  digitalWrite(LED_NARANJA, HIGH);
+}
+
+void actualizarParpadeo() {
+  if (cambiosPendientes == 0) return;
+  if (millis() - ultimoCambio < PARPADEO_MS) return;
+
+  ultimoCambio = millis();
+  cambiosPendientes--;
+  if (cambiosPendientes == 0) {
+    digitalWrite(LED_NARANJA, alertaTemperatura ? HIGH : LOW);
   } else {
-    digitalWrite(LED_NARANJA, LOW);
-  }
-  
-  // Parpadeo para indicar recepción de datos
-  parpadearLED(LED_NARANJA, 3, 100);
-}
-
-void parpadearLED(int pin, int veces, int delay_ms) {
-  for(int i = 0; i < veces; i++) {
-    digitalWrite(pin, HIGH);
-    delay(delay_ms);
-    digitalWrite(pin, LOW);
-    delay(delay_ms);
-  }
-}
-
-// Función para efecto de respiración
-void efectoRespiracion(int pin) {
-  // Incrementar brillo
-  for(int i = 0; i <= 255; i++) {
-    ledcWrite(0, i);
-    delay(5);
-  }
-  // Decrementar brillo
-  for(int i = 255; i >= 0; i--) {
-    ledcWrite(0, i);
-    delay(5);
+    digitalWrite(LED_NARANJA, !digitalRead(LED_NARANJA));
   }
 }

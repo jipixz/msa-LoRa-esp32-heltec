@@ -9,7 +9,7 @@
 #include <BH1750.h>
 
 // Configuración de pines
-const int sensorPin = 7;      // GPIO48 - Entrada analógica del sensor HW-390
+const int sensorPin = 7;      // GPIO7 - Entrada analógica del sensor HW-390
 const int ds18b20Pin = 1;     // GPIO1 - Para el sensor DS18B20
 const int sdaPin = 41;        // GPIO41 - SDA para BME280
 const int sclPin = 42;        // GPIO42 - SCL para BME280
@@ -26,9 +26,16 @@ const int WET = 1100;
 #define TIME_TO_SLEEP 1800
 #define MAX_RANDOM_DELAY 60
 
+// Identificador del nodo (se envía en cada paquete como "Nodo:N")
+const int NODE_ID = 0;
+
 // Variables RTC
 RTC_DATA_ATTR int bootCount = 0;
-RTC_DATA_ATTR unsigned long lastSendTime = 0;
+
+// Estado de los sensores en este ciclo (si uno falla se transmite igual,
+// con el valor como "nan" y su nombre en el campo "Err")
+bool bmeOk = false;
+bool dsOk = false;
 
 // Instanciación de buses I2C
 TwoWire I2CBME = TwoWire(1);
@@ -53,30 +60,33 @@ void setup() {
   I2CBME.begin(sdaPin, sclPin, 100000);
   
   // 2. Inicializar BME280
-  if (!bme.begin(0x76, &I2CBME)) {
+  // Si falla no se detiene el nodo: se transmite el resto de los datos
+  bmeOk = bme.begin(0x76, &I2CBME);
+  if (!bmeOk) {
     both.println("Error BME280! Verificar:");
     both.println("1. Dirección 0x76/0x77");
     both.println("2. Cableado SDA/SCL");
-    goToDeepSleep();
+  } else {
+    both.print("ID Sensor: 0x");
+    both.println(bme.sensorID(), HEX);
   }
-  
+
   // 3. Inicializar BH1750
   lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23, &I2CBME);
-  
+
+  // 4. Inicializar DS18B20
   pinMode(ds18b20Pin, INPUT_PULLUP);
   ds18b20.begin();
-  if(ds18b20.getDS18Count() == 0) {
+  dsOk = ds18b20.getDS18Count() > 0;
+  if (!dsOk) {
     both.println("Error DS18B20! Verificar:");
     both.println("1. Resistencia pull-up 4.7kΩ");
     both.println("2. Cableado GPIO1");
   }
-  
-  // 5. Configurar pines del sensor de lluvia
+
+  // 5. Configurar pines del sensor de humedad de suelo y de lluvia
   pinMode(sensorPin, INPUT);
   pinMode(rainDigitalPin, INPUT_PULLUP);
-  
-  both.print("ID Sensor: 0x");
-  both.println(bme.sensorID(), HEX);
   
   // Configuración LoRa para LARGO ALCANCE
   RADIOLIB_OR_HALT(radio.begin());
@@ -115,60 +125,73 @@ void loop() {
 }
 
 void transmitSensorData() {
-  // ... TU CÓDIGO ACTUAL SIN CAMBIOS ...
-  
   int rawValue = analogRead(sensorPin);
   int soilMoisture = map(rawValue, WET, DRY, 100, 0);
   soilMoisture = constrain(soilMoisture, 0, 100);
 
-  ds18b20.requestTemperatures();
-  float tempDS = ds18b20.getTempCByIndex(0);
-  
+  // DS18B20: -127 °C (DEVICE_DISCONNECTED_C) significa que no respondió
+  float tempDS = NAN;
+  if (dsOk) {
+    ds18b20.requestTemperatures();
+    tempDS = ds18b20.getTempCByIndex(0);
+    if (tempDS == DEVICE_DISCONNECTED_C) tempDS = NAN;
+  }
+
   float tempBME = NAN, pressure = NAN, humidity = NAN;
-  if(!isnan(bme.readTemperature())) {
+  if (bmeOk) {
     tempBME = bme.readTemperature();
     pressure = bme.readPressure() / 100.0F;
     humidity = bme.readHumidity();
   }
-  
+
   int rainAnalog = analogRead(rainAnalogPin);
   bool rainDigital = digitalRead(rainDigitalPin);
-  float lux = lightMeter.readLightLevel();
+  float lux = lightMeter.readLightLevel();  // negativo = error del BH1750
+  if (lux < 0) lux = NAN;
   int rainPercent = map(rainAnalog, 4095, 0, 0, 100);
   rainPercent = constrain(rainPercent, 0, 100);
 
-  String message = "HS:" + String(soilMoisture) + 
-                  "% | T1:" + String(tempDS,1) + 
-                  "C | T2:" + String(tempBME,1) + 
-                  "C | P:" + String(pressure,0) + 
-                  "hPa | HA:" + String(humidity,1) + 
-                  "% | Lux:" + String(lux,0) + 
-                  "lx | Rain:" + String(rainPercent) + 
-                  "% | RainBool: " + (rainDigital ? "SI" : "NO") +
-                  "\nNodo: 0";
+  // Sensores que fallaron en este ciclo (el backend ignora claves que no conoce)
+  String errores = "";
+  if (isnan(tempDS))  errores += "DS18B20,";
+  if (isnan(tempBME)) errores += "BME280,";
+  if (isnan(lux))     errores += "BH1750,";
+  if (errores.length() > 0) errores.remove(errores.length() - 1);
 
-  String messageOLED = "HS:" + String(soilMoisture) + 
-                  "% | T1:" + String(tempDS,1) + 
-                  "C | \nT2:" + String(tempBME,1) + 
-                  "C | P:" + String(pressure,0) + 
-                  "hPa | \nHA:" + String(humidity,1) + 
-                  "% | Lux:" + String(lux,0) + 
-                  "lx | \nRain:" + String(rainPercent) + 
+  // Formato que entiende parseSensorData() de msa-back: "CLAVE:valor | CLAVE:valor ..."
+  // Todo en una sola línea para que el receptor la reenvíe completa por Serial.
+  // Un valor "nan" lo descarta el backend y el resto del paquete se guarda igual.
+  String message = "HS:" + String(soilMoisture) +
+                  "% | T1:" + String(tempDS,1) +
+                  "C | T2:" + String(tempBME,1) +
+                  "C | P:" + String(pressure,0) +
+                  "hPa | HA:" + String(humidity,1) +
+                  "% | Lux:" + String(lux,0) +
+                  "lx | Rain:" + String(rainPercent) +
+                  "% | RainBool:" + (rainDigital ? "SI" : "NO") +
+                  " | Nodo:" + String(NODE_ID);
+  if (errores.length() > 0) message += " | Err:" + errores;
+
+  String messageOLED = "HS:" + String(soilMoisture) +
+                  "% | T1:" + String(tempDS,1) +
+                  "C | \nT2:" + String(tempBME,1) +
+                  "C | P:" + String(pressure,0) +
+                  "hPa | \nHA:" + String(humidity,1) +
+                  "% | Lux:" + String(lux,0) +
+                  "lx | \nRain:" + String(rainPercent) +
                   "% | RainD: " + (rainDigital ? "SI" : "NO") +
-                  "\nNodo: 0";
+                  "\nNodo: " + String(NODE_ID);
+  if (errores.length() > 0) messageOLED += "\nErr: " + errores;
 
   both.print("\nDATA  Boot #" + String(bootCount) + "\n" + String(messageOLED));
-  
+
   RADIOLIB(radio.transmit(message.c_str()));
-  
+
   if (_radiolib_status == RADIOLIB_ERR_NONE) {
     both.println("Transmisión exitosa");
   } else {
     both.println("Error TX: " + String(_radiolib_status));
-    reiniciarI2C();
   }
-  
-  lastSendTime = millis();
 }
 
 void enableDummyLoad() {                                        // ← NUEVA FUNCIÓN
@@ -191,12 +214,4 @@ void goToDeepSleep() {
   both.flush();
   
   esp_deep_sleep_start();
-}
-
-void reiniciarI2C() {
-  I2CBME.end();
-  delay(100);
-  I2CBME.begin(sdaPin, sclPin, 100000);
-  bme.begin(0x76, &I2CBME);
-  lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23, &I2CBME);
 }
