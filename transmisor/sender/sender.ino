@@ -1,5 +1,6 @@
-// Código emisor para Heltec WiFi_LoRa_32_V3 con múltiples sensores
-// Versión optimizada para máxima autonomía + configuración largo alcance
+// Nodo de campo (emisor) para Heltec WiFi LoRa 32 V3 (ESP32-S3 + SX1262).
+// Ciclo: despierta → mide → transmite un paquete LoRa → duerme INTERVALO_S + jitter.
+// La configuración del nodo (ID, intervalo, calibración, energía) está en config.h.
 #include <heltec_unofficial.h>
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
@@ -7,37 +8,27 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <BH1750.h>
+#include "driver/gpio.h"
+#include "config.h"
 
 // Configuración de pines
 const int sensorPin = 7;      // GPIO7 - Entrada analógica del sensor HW-390
-const int ds18b20Pin = 1;     // GPIO1 - Para el sensor DS18B20
-const int sdaPin = 41;        // GPIO41 - SDA para BME280
-const int sclPin = 42;        // GPIO42 - SCL para BME280
+const int ds18b20Pin = 1;     // GPIO1 - DS18B20 (ojo: en la V3 también es VBAT_ADC; ver README)
+const int sdaPin = 41;        // GPIO41 - SDA para BME280 y BH1750
+const int sclPin = 42;        // GPIO42 - SCL para BME280 y BH1750
 const int rainAnalogPin = 2;  // GPIO2 - Entrada analógica YL-83
 const int rainDigitalPin = 3; // GPIO3 - Entrada digital YL-83
-const int dummyLoadPin = 48;  // GPIO48 - Pin para dummy load resistencia  // ← NUEVO
 
-// Variables para el sensor de humedad de suelo
-const int DRY = 3600;
-const int WET = 1100; 
-
-// Deep Sleep Configuration 
-#define uS_TO_S_FACTOR 1000000ULL
-#define TIME_TO_SLEEP 1800
-#define MAX_RANDOM_DELAY 60
-
-// Identificador del nodo (se envía en cada paquete como "Nodo:N")
-const int NODE_ID = 0;
-
-// Variables RTC
-RTC_DATA_ATTR int bootCount = 0;
+// Contador de ciclos: sobrevive al deep sleep (RTC). Viaja como "Seq" para detectar
+// paquetes perdidos (si el backend ve un salto en Seq, se perdió al menos un paquete).
+RTC_DATA_ATTR uint32_t bootCount = 0;
 
 // Estado de los sensores en este ciclo (si uno falla se transmite igual,
 // con el valor como "nan" y su nombre en el campo "Err")
 bool bmeOk = false;
 bool dsOk = false;
+bool luxOk = false;
 
-// Instanciación de buses I2C
 TwoWire I2CBME = TwoWire(1);
 Adafruit_BME280 bme;
 BH1750 lightMeter;
@@ -47,34 +38,36 @@ DallasTemperature ds18b20(&oneWire);
 void setup() {
   ++bootCount;
   heltec_setup();
+#if !MOSTRAR_OLED
+  heltec_display_power(false);
+#endif
 
-  // Verificar razón del despertar
-  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-  if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
-    both.println("Despertar por timer - Boot #" + String(bootCount));
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+    both.printf("Nodo %d · ciclo #%lu\n", NODE_ID, (unsigned long)bootCount);
   }
 
-  // 1. Inicializar I2C con pull-ups
+  // 1. I2C
   pinMode(sdaPin, INPUT_PULLUP);
   pinMode(sclPin, INPUT_PULLUP);
   I2CBME.begin(sdaPin, sclPin, 100000);
-  
-  // 2. Inicializar BME280
-  // Si falla no se detiene el nodo: se transmite el resto de los datos
+
+  // 2. BME280 en modo forzado: mide solo cuando se le pide y vuelve a dormir.
+  // Si falla no se detiene el nodo: se transmite el resto de los datos.
   bmeOk = bme.begin(0x76, &I2CBME);
   if (!bmeOk) {
     both.println("Error BME280! Verificar:");
     both.println("1. Dirección 0x76/0x77");
     both.println("2. Cableado SDA/SCL");
   } else {
-    both.print("ID Sensor: 0x");
-    both.println(bme.sensorID(), HEX);
+    bme.setSampling(Adafruit_BME280::MODE_FORCED,
+                    Adafruit_BME280::SAMPLING_X1, Adafruit_BME280::SAMPLING_X1, Adafruit_BME280::SAMPLING_X1,
+                    Adafruit_BME280::FILTER_OFF);
   }
 
-  // 3. Inicializar BH1750
-  lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x23, &I2CBME);
+  // 3. BH1750 en una sola medición: se apaga solo después de medir.
+  luxOk = lightMeter.begin(BH1750::ONE_TIME_HIGH_RES_MODE, 0x23, &I2CBME);
 
-  // 4. Inicializar DS18B20
+  // 4. DS18B20
   pinMode(ds18b20Pin, INPUT_PULLUP);
   ds18b20.begin();
   dsOk = ds18b20.getDS18Count() > 0;
@@ -84,50 +77,38 @@ void setup() {
     both.println("2. Cableado GPIO1");
   }
 
-  // 5. Configurar pines del sensor de humedad de suelo y de lluvia
+  // 5. Humedad de suelo y lluvia
   pinMode(sensorPin, INPUT);
   pinMode(rainDigitalPin, INPUT_PULLUP);
-  
-  // Configuración LoRa para LARGO ALCANCE
+
+  // Radio LoRa: estos parámetros deben coincidir con el receptor (lo revisa tests/decisiones.test.mjs)
   RADIOLIB_OR_HALT(radio.begin());
-  RADIOLIB_OR_HALT(radio.setFrequency(905.2)); 
+  RADIOLIB_OR_HALT(radio.setFrequency(905.2));
   RADIOLIB_OR_HALT(radio.setOutputPower(22));
   RADIOLIB_OR_HALT(radio.setSpreadingFactor(12));
   RADIOLIB_OR_HALT(radio.setBandwidth(250.0));
-  
-  // *** CONFIGURACIONES CRÍTICAS PARA 1.5 KM ***
   RADIOLIB_OR_HALT(radio.setCodingRate(8));
   RADIOLIB_OR_HALT(radio.setCurrentLimit(140));
   RADIOLIB_OR_HALT(radio.setPreambleLength(12));
   RADIOLIB_OR_HALT(radio.setCRC(true));
-  
-  both.println("Sistema inicializado, comenzando lecturas...");
-  
-  // Retraso anti-colisión
-  uint32_t randomDelay = esp_random() % (MAX_RANDOM_DELAY + 1);
-  both.print("Retraso anti-colisión: ");
-  both.print(randomDelay);
-  both.println(" segundos");
-  delay(randomDelay * 1000);
-  
-  // Transmitir datos
+
+  // Se transmite de inmediato; el aleatorio anticolisión va en el tiempo de sueño
   transmitSensorData();
-  
-  // Activar dummy load antes del deep sleep                    // ← NUEVO
-  enableDummyLoad();                                            // ← NUEVO
-  
-  // Ir a deep sleep
-  goToDeepSleep();
+  dormir();
 }
 
 void loop() {
-  // Nunca se ejecuta debido al deep sleep
+  // Nunca se ejecuta: cada ciclo termina en deep sleep
+}
+
+/** Número con decimales fijos o "nan" (el backend descarta "nan" y guarda el resto). */
+String num(float v, int decimales) {
+  return isnan(v) ? String("nan") : String(v, decimales);
 }
 
 void transmitSensorData() {
   int rawValue = analogRead(sensorPin);
-  int soilMoisture = map(rawValue, WET, DRY, 100, 0);
-  soilMoisture = constrain(soilMoisture, 0, 100);
+  int soilMoisture = constrain(map(rawValue, WET, DRY, 100, 0), 0, 100);
 
   // DS18B20: -127 °C (DEVICE_DISCONNECTED_C) significa que no respondió
   float tempDS = NAN;
@@ -138,18 +119,23 @@ void transmitSensorData() {
   }
 
   float tempBME = NAN, pressure = NAN, humidity = NAN;
-  if (bmeOk) {
+  if (bmeOk && bme.takeForcedMeasurement()) {
     tempBME = bme.readTemperature();
     pressure = bme.readPressure() / 100.0F;
     humidity = bme.readHumidity();
   }
 
+  float lux = NAN;
+  if (luxOk) {
+    uint32_t t0 = millis();
+    while (!lightMeter.measurementReady(true) && millis() - t0 < 400) delay(10);
+    lux = lightMeter.readLightLevel();  // negativo = error del BH1750
+    if (lux < 0) lux = NAN;
+  }
+
   int rainAnalog = analogRead(rainAnalogPin);
   bool rainDigital = digitalRead(rainDigitalPin);
-  float lux = lightMeter.readLightLevel();  // negativo = error del BH1750
-  if (lux < 0) lux = NAN;
-  int rainPercent = map(rainAnalog, 4095, 0, 0, 100);
-  rainPercent = constrain(rainPercent, 0, 100);
+  int rainPercent = constrain(map(rainAnalog, 4095, 0, 0, 100), 0, 100);
 
   // Sensores que fallaron en este ciclo (el backend ignora claves que no conoce)
   String errores = "";
@@ -158,35 +144,32 @@ void transmitSensorData() {
   if (isnan(lux))     errores += "BH1750,";
   if (errores.length() > 0) errores.remove(errores.length() - 1);
 
-  // Formato que entiende parseSensorData() de msa-back: "CLAVE:valor | CLAVE:valor ..."
-  // Todo en una sola línea para que el receptor la reenvíe completa por Serial.
-  // Un valor "nan" lo descarta el backend y el resto del paquete se guarda igual.
+  // Paquete compacto, en una línea, en el formato de parseSensorData() de msa-back:
+  //   "HS:45|T1:25.3|T2:26.1|P:1008|HA:80.2|Lux:18400|Rain:0|RainBool:0|Nodo:3|Seq:152"
+  // Sin unidades ni espacios (~76 bytes en vez de ~100: ~0.5 s menos al aire con SF12).
+  // RainBool: 1 = llueve, 0 = no. Seq: contador de ciclos para detectar paquetes perdidos.
   String message = "HS:" + String(soilMoisture) +
-                  "% | T1:" + String(tempDS,1) +
-                  "C | T2:" + String(tempBME,1) +
-                  "C | P:" + String(pressure,0) +
-                  "hPa | HA:" + String(humidity,1) +
-                  "% | Lux:" + String(lux,0) +
-                  "lx | Rain:" + String(rainPercent) +
-                  "% | RainBool:" + (rainDigital ? "SI" : "NO") +
-                  " | Nodo:" + String(NODE_ID);
-  if (errores.length() > 0) message += " | Err:" + errores;
+                   "|T1:" + num(tempDS, 1) +
+                   "|T2:" + num(tempBME, 1) +
+                   "|P:" + num(pressure, 0) +
+                   "|HA:" + num(humidity, 1) +
+                   "|Lux:" + num(lux, 0) +
+                   "|Rain:" + String(rainPercent) +
+                   "|RainBool:" + (rainDigital ? "1" : "0") +
+                   "|Nodo:" + String(NODE_ID) +
+                   "|Seq:" + String(bootCount);
+  if (errores.length() > 0) message += "|Err:" + errores;
 
-  String messageOLED = "HS:" + String(soilMoisture) +
-                  "% | T1:" + String(tempDS,1) +
-                  "C | \nT2:" + String(tempBME,1) +
-                  "C | P:" + String(pressure,0) +
-                  "hPa | \nHA:" + String(humidity,1) +
-                  "% | Lux:" + String(lux,0) +
-                  "lx | \nRain:" + String(rainPercent) +
-                  "% | RainD: " + (rainDigital ? "SI" : "NO") +
-                  "\nNodo: " + String(NODE_ID);
-  if (errores.length() > 0) messageOLED += "\nErr: " + errores;
-
-  both.print("\nDATA  Boot #" + String(bootCount) + "\n" + String(messageOLED));
+#if MOSTRAR_OLED
+  both.printf("\nNodo %d · #%lu\n", NODE_ID, (unsigned long)bootCount);
+  both.println("Suelo " + String(soilMoisture) + "%  T1 " + num(tempDS, 1) + "C");
+  both.println("Aire " + num(tempBME, 1) + "C  " + num(humidity, 0) + "%");
+  both.println("Lluvia " + String(rainPercent) + "%  " + (rainDigital ? "SI" : "NO"));
+  if (errores.length() > 0) both.println("Err: " + errores);
+#endif
+  Serial.println(message);
 
   RADIOLIB(radio.transmit(message.c_str()));
-
   if (_radiolib_status == RADIOLIB_ERR_NONE) {
     both.println("Transmisión exitosa");
   } else {
@@ -194,24 +177,21 @@ void transmitSensorData() {
   }
 }
 
-void enableDummyLoad() {                                        // ← NUEVA FUNCIÓN
-  // Activar carga dummy para mantener Shield V9 activo
-  pinMode(dummyLoadPin, OUTPUT);
-  digitalWrite(dummyLoadPin, HIGH);
-  both.println("Dummy load activado en GPIO" + String(dummyLoadPin));
-}
+void dormir() {
+  // Aleatorio anticolisión: se suma al sueño en vez de esperarse despierto
+  uint32_t segundos = INTERVALO_S + esp_random() % (JITTER_MAX_S + 1);
+  both.printf("Durmiendo %lu s\n", (unsigned long)segundos);
 
-void goToDeepSleep() {
-  both.println("Preparando para deep sleep por 30 minutos...");
-  both.flush();
-  
+#if USAR_DUMMY_LOAD
+  // Mantiene la carga encendida DURANTE el deep sleep: sin gpio_hold el pin se suelta
+  // al dormir y el shield (modo NORMAL) se apaga.
+  pinMode(DUMMY_LOAD_PIN, OUTPUT);
+  digitalWrite(DUMMY_LOAD_PIN, HIGH);
+  gpio_hold_en((gpio_num_t)DUMMY_LOAD_PIN);
+  gpio_deep_sleep_hold_en();
+#endif
+
   I2CBME.end();
-  radio.sleep();
-  
-  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
-  
-  both.println("Entrando en deep sleep...");
-  both.flush();
-  
-  esp_deep_sleep_start();
+  // Apaga OLED, Vext y radio correctamente y entra en deep sleep
+  heltec_deep_sleep(segundos);
 }

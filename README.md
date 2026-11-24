@@ -1,106 +1,122 @@
-# 🌱 Sistema de Monitoreo de Cacao con LoRa
+# AgroMonitor · firmware LoRa (ESP32 Heltec V3)
 
-[![ESP32](https://img.shields.io/badge/ESP32-Heltec-blue)](https://heltec.org/)
-[![LoRa](https://img.shields.io/badge/LoRa-Comunicación-green)](https://lora-alliance.org/)
-[![Licencia](https://img.shields.io/badge/Licencia-MIT-yellow)](LICENSE)
-[![Estatus](https://img.shields.io/badge/Estatus-En%20Desarrollo-red)](https://github.com/username/repo)
-
-## 📋 Descripción
-
-Sistema de trazabilidad para cultivos de cacao utilizando tecnología LoRa y sensores de humedad y temperatura. Este proyecto permite monitorear en tiempo real las condiciones ambientales y del suelo en las plantaciones de cacao para optimizar la producción y garantizar la calidad del cultivo.
-
-## 🛠️ Hardware Utilizado
-
-- Placas ESP32 Heltec HTIT-WB32LAF con capacidades LoRa
-- Sensores de humedad del suelo HW-390
-- Sensores de temperatura y humedad ambiental
-
-## ✨ Características
-
-- Transmisión de datos mediante tecnología LoRa para largo alcance
-- Monitoreo en tiempo real de humedad del suelo
-- Monitoreo de temperatura y humedad ambiental
-- Bajo consumo energético para operación prolongada
-- Calibración de sensores para lecturas precisas
-
-## 📊 Arquitectura del Sistema
-
-El sistema consta de dos componentes principales:
-
-1. **Nodos Transmisores**: Instalados en el campo de cultivo, estos dispositivos recolectan datos de los sensores y los transmiten a través de LoRa.
-
-2. **Nodo Receptor**: Recibe los datos de los transmisores y los procesa para su visualización o análisis posterior.
-
-## 💾 Estructura del Proyecto
+Nodos de campo y gateway LoRa para monitorear una plantación (hoy cacao en Cerro Blanco 5ta
+Sección, Tacotalpa, Tabasco). Cada nodo mide suelo y ambiente, transmite por LoRa y duerme;
+el gateway reenvía cada paquete por USB a una Raspberry Pi, donde
+[msa-back](https://github.com/jipixz/msa-back) lo guarda en MongoDB y
+[msa-front](https://github.com/jipixz/msa-front) lo muestra.
 
 ```
-├── calibration/              # Calibración de sensores
-│   └── humiditySensorCalibration.ino
-├── transmisor/               # Código para nodos transmisores
-│   └── sender.ino
-├── receptor/                 # Código para nodo receptor
-│   └── receiber.ino
-└── README.md                 # Este archivo
+ Nodo 0..N (campo)              Gateway (casa)            Raspberry Pi
+┌──────────────────┐  LoRa    ┌───────────────┐  USB    ┌─────────────────────────────┐
+│ HW-390  DS18B20  │ 905.2MHz │ Heltec V3     │ serial  │ msa-back (Node) → MongoDB    │
+│ BME280  BH1750   │ ───────▶ │ receiver.ino  │ ──────▶ │ msa-back-LR-py (predicciones)│
+│ YL-83   sender   │  SF12    │ OLED + LEDs   │ 115200  │ msa-front (panel web)        │
+└──────────────────┘          └───────────────┘         └─────────────────────────────┘
 ```
 
-## 🚀 Instalación
+## Estructura
 
-1. Clona este repositorio:
-   ```bash
-   git clone https://github.com/username/cacao-trazabilidad.git
-   ```
+| Carpeta | Qué es |
+|---|---|
+| `transmisor/sender/` | Nodo de campo. **`config.h`** tiene lo que cambia por nodo (ID, intervalo, calibración, energía). |
+| `receptor/receiver/` | Gateway: recibe, reenvía una línea por paquete por Serial, resumen en OLED y LEDs. |
+| `calibration/humiditySensorCalibration/` | Muestra el valor crudo del HW-390 para obtener `DRY`/`WET`. |
+| `tests/` | Pruebas del firmware (`node --test`) y compilación de los 3 sketches. |
 
-2. Abre los archivos `.ino` en el Arduino IDE o PlatformIO.
+## Hardware y pines (nodo)
 
-3. Instala la biblioteca `heltec_unofficial.h`.
+| Sensor | Mide | Pin (GPIO) |
+|---|---|---|
+| HW-390 capacitivo | Humedad del suelo (ADC) | 7 |
+| DS18B20 | Temperatura del suelo (1-Wire, pull-up 4.7 kΩ) | 1 ⚠️ |
+| BME280 | Temperatura, humedad del aire y presión (I²C 0x76) | SDA 41 · SCL 42 |
+| BH1750 | Luz (I²C 0x23) | SDA 41 · SCL 42 |
+| YL-83 | Lluvia (analógico y digital) | 2 · 3 |
 
-4. Ajusta los parámetros de calibración según tus sensores y condiciones específicas.
+- Placa: **Heltec WiFi LoRa 32 V3** (ESP32-S3 + SX1262). Solo GPIO1–20 tienen ADC.
+- ⚠️ En la V3 el **GPIO1 también es VBAT_ADC** (lectura de batería). Mientras el DS18B20 esté
+  ahí no se puede reportar el voltaje de la batería: mover el DS18B20 a otro GPIO libre es el
+  siguiente cambio de hardware.
+- Alimentación: shield **V9 de 4×18650** con el switch en **HOLD** (en NORMAL se apaga solo
+  cuando el nodo duerme). Si tu shield no tiene HOLD, activa `USAR_DUMMY_LOAD` en `config.h`.
 
-5. Carga los programas en sus respectivas placas ESP32.
+## Configurar un nodo nuevo
 
-## ⚙️ Configuración
+1. Calibra el sensor de humedad con `calibration/` (seco al aire y en suelo saturado) y copia
+   los valores a `DRY` y `WET` de `transmisor/sender/config.h`.
+2. Pon un `NODE_ID` único (0–255) en `config.h`.
+3. Compila y sube `transmisor/sender` a la placa del nodo.
 
-### Calibración de Sensores de Humedad
+## Ciclo del nodo y energía
 
-Los sensores de humedad del suelo requieren calibración según el tipo de suelo:
+1. Despierta, mide (BME280 en modo forzado y BH1750 de una sola medición: ambos duermen
+   entre lecturas) y transmite de inmediato.
+2. Duerme `INTERVALO_S` (30 min) **más** un aleatorio de 0–`JITTER_MAX_S` s para que varios
+   nodos no transmitan a la vez. El aleatorio se duerme, no se espera despierto.
+3. `heltec_deep_sleep()` apaga correctamente el OLED, Vext y la radio.
+4. Si un sensor falla, el paquete sale igual con `nan` en ese campo y `Err:` con su nombre.
 
-```cpp
-// Valores de calibración para sensor de humedad del suelo
-const int DRY = 3600;  // Valor en suelo completamente seco
-const int WET = 1100;  // Valor en suelo saturado de agua
+## Protocolo (una línea por paquete)
+
+```
+HS:45|T1:25.3|T2:26.1|P:1008|HA:80.2|Lux:18400|Rain:0|RainBool:0|Nodo:3|Seq:152[|Err:BME280]
 ```
 
-### Configuración de LoRa
+| Clave | Campo en Mongo | Unidad |
+|---|---|---|
+| `HS` | humedadSuelo | % (0–100) |
+| `T1` | temperaturaDS | °C (DS18B20, suelo) |
+| `T2` | temperaturaBME | °C (aire) |
+| `P` | presion | hPa |
+| `HA` | humedadAire | % |
+| `Lux` | luminosidad | lx |
+| `Rain` | lluvia | % (sensor YL-83) |
+| `RainBool` | rainDigital | 1 = llueve, 0 = no |
+| `Nodo` | nodo | ID del nodo |
+| `Seq` | — | contador de ciclos (un salto = paquete perdido) |
+| `Err` | — | sensores que fallaron en ese ciclo |
 
-Ajusta los parámetros de LoRa según tu región y necesidades:
+- Sin unidades ni espacios: ~76 bytes, **≈2.5 s al aire** con SF12/BW250/CR4-8 (antes ~100
+  bytes y ≈3.0 s). El backend también acepta el formato anterior (`HS:45% | T1:25.3C | …`).
+- El backend descarta valores fuera del rango físico (p. ej. 700 % de un ADC al aire).
+- El contrato con el backend vive en `msa-back/test/fixtures/paquetes-firmware.txt`.
 
-```cpp
-RADIOLIB_OR_HALT(radio.setFrequency(905.2));  // Frecuencia en MHz
-RADIOLIB_OR_HALT(radio.setOutputPower(10));   // Potencia en dBm
-RADIOLIB_OR_HALT(radio.setSpreadingFactor(12));
-RADIOLIB_OR_HALT(radio.setBandwidth(250.0));
+## Radio
+
+905.2 MHz · SF12 · BW 250 kHz · CR 4/8 · preámbulo 12 · CRC · 22 dBm. Emisor y receptor
+deben coincidir (lo revisa `tests/decisiones.test.mjs`). Revisa la normativa de 902–928 MHz
+de tu país (en México, IFT) antes de un despliegue fijo: con un canal de 250 kHz los tiempos
+largos al aire pueden exceder lo permitido; BW 500 kHz es la alternativa.
+
+## Compilar
+
+Arduino IDE 2 o `arduino-cli`, placa **`esp32:esp32:heltec_wifi_lora_32_V3`**.
+
+| Dependencia | Versión probada |
+|---|---|
+| Core esp32 (Espressif) | 3.2.0 |
+| Heltec_ESP32_LoRa_v3 (`heltec_unofficial`) | 0.9.2 |
+| RadioLib | **7.x** (8.0.0 no compila con heltec_unofficial 0.9.2) |
+| Adafruit BME280 / Unified Sensor | 2.3.0 / 1.1.15 |
+| OneWire / DallasTemperature | 2.3.8 / 4.0.6 |
+| BH1750 | 1.3.0 |
+
+## Pruebas
+
+```bash
+node --test tests/decisiones.test.mjs   # radio igual en emisor y receptor, protocolo, energía, calibración
+node tests/compilar.mjs                 # compila los 3 sketches (ARDUINO_CLI=ruta si no está en el PATH)
 ```
 
-## 📝 Uso
+## Pendientes
 
-1. Coloca los nodos transmisores en los puntos estratégicos del cultivo de cacao.
-2. Ubica el nodo receptor en un lugar con buena recepción.
-3. Los datos de humedad del suelo y condiciones ambientales se transmitirán en los intervalos configurados.
-4. Visualiza los datos recibidos para tomar decisiones sobre el manejo del cultivo.
+- Mover el DS18B20 fuera del GPIO1 y reportar el voltaje de batería.
+- Probar en campo el consumo del ciclo nuevo y el alcance con varios nodos.
+- Paquete binario y ACK con reintento (requiere cambiar receptor y backend a la vez).
+- Configuración por plantación/cultivo (umbrales y nodos por archivo), para usarlo con
+  otros cultivos además del cacao.
 
-## 🤝 Contribuir
+## Licencia
 
-Las contribuciones son bienvenidas. Por favor, abre un issue para discutir los cambios propuestos.
-
-## 📄 Licencia
-
-Este proyecto está bajo la Licencia MIT - ver el archivo [LICENSE](LICENSE) para más detalles.
-
-## 📞 Contacto
-
-Para más información, contacta a [tu@email.com](mailto:tu@email.com).
-
-## 🙏 Agradecimientos
-
-- Universidad Juárez Autónoma de Tabasco
-- Colaboradores y asesores del proyecto 
+[MIT](LICENSE) · Proyecto de la Maestría en la Universidad Juárez Autónoma de Tabasco.
