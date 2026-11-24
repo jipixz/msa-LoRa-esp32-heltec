@@ -111,3 +111,17 @@ test("config.h: NODE_ID en rango 0–255", () => {
   const id = constante(emisor, "NODE_ID")
   assert.ok(id >= 0 && id <= 255, `NODE_ID=${id}`)
 })
+
+test("cableado 2: no usa pines reservados de la Heltec V3 ni de arranque", () => {
+  const bloque = emisor.slice(emisor.indexOf("#if CABLEADO == 2"), emisor.indexOf("#else", emisor.indexOf("#if CABLEADO == 2")))
+  const pines = [...bloque.matchAll(/const int \w+ = (\d+);/g)].map((m) => Number(m[1]))
+  // 0 botón · 1 VBAT · 3/45/46 arranque · 8–14 LoRa · 17/18/21 OLED · 19/20 USB · 35 LED · 36 Vext · 37 VBAT_CTRL
+  const reservados = [0, 1, 3, 8, 9, 10, 11, 12, 13, 14, 17, 18, 19, 20, 21, 35, 36, 37, 45, 46]
+  assert.ok(pines.length >= 2, "no se encontraron los pines del cableado 2")
+  for (const p of pines) assert.ok(!reservados.includes(p), `GPIO${p} está reservado`)
+})
+
+test("cableado 2: lee la batería y la manda como Bat (en el cableado 1 no, GPIO1 está ocupado)", () => {
+  assert.match(emisor, /#if CABLEADO == 2[\s\S]*#define LEER_BATERIA 1[\s\S]*#else[\s\S]*#define LEER_BATERIA 0/)
+  assert.match(emisor, /"\|Bat:" \+ num\(heltec_vbat\(\), 2\)/)
+})

@@ -18,11 +18,17 @@ if (radiolib && Number(radiolib[1]) >= 8) {
   process.exit(1)
 }
 
+// El emisor se compila con los dos cableados (config.h: CABLEADO 1 actual, 2 nuevo)
+const trabajos = sketches.flatMap((s) => s === "transmisor/sender"
+  ? [[s, []], [s + " (CABLEADO=2)", ["--build-property", "compiler.cpp.extra_flags=-DCABLEADO=2"]]]
+  : [[s, []]])
+
 let fallas = 0
-for (const s of sketches) {
+for (const [nombre, flags] of trabajos) {
+  const s = nombre.replace(/ \(.*\)$/, "")
   try {
-    execFileSync(cli, [...extra, "compile", "--fqbn", FQBN, path.join(raiz, s)], { stdio: "pipe", encoding: "utf8" })
-    console.log(`ok    ${s}`)
+    execFileSync(cli, [...extra, "compile", "--fqbn", FQBN, ...flags, path.join(raiz, s)], { stdio: "pipe", encoding: "utf8" })
+    console.log(`ok    ${nombre}`)
   } catch (e) {
     fallas++
     console.log(`FALLA ${s}\n${(e.stdout || "") + (e.stderr || "")}`.split("\n").filter((l) => /error/i.test(l)).slice(0, 10).join("\n"))

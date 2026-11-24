@@ -13,11 +13,18 @@
 
 // Configuración de pines
 const int sensorPin = 7;      // GPIO7 - Entrada analógica del sensor HW-390
-const int ds18b20Pin = 1;     // GPIO1 - DS18B20 (ojo: en la V3 también es VBAT_ADC; ver README)
+#if CABLEADO == 2
+const int ds18b20Pin = 39;    // GPIO39 - DS18B20 (cableado 2: GPIO1 queda para leer la batería)
+const int rainDigitalPin = 40; // GPIO40 - Entrada digital YL-83 (cableado 2: GPIO3 es de arranque)
+#define LEER_BATERIA 1
+#else
+const int ds18b20Pin = 1;     // GPIO1 - DS18B20 (cableado 1; en la V3 también es VBAT_ADC)
+const int rainDigitalPin = 3; // GPIO3 - Entrada digital YL-83 (cableado 1)
+#define LEER_BATERIA 0
+#endif
 const int sdaPin = 41;        // GPIO41 - SDA para BME280 y BH1750
 const int sclPin = 42;        // GPIO42 - SCL para BME280 y BH1750
 const int rainAnalogPin = 2;  // GPIO2 - Entrada analógica YL-83
-const int rainDigitalPin = 3; // GPIO3 - Entrada digital YL-83
 
 // Contador de ciclos: sobrevive al deep sleep (RTC). Viaja como "Seq" para detectar
 // paquetes perdidos (si el backend ve un salto en Seq, se perdió al menos un paquete).
@@ -37,7 +44,10 @@ DallasTemperature ds18b20(&oneWire);
 
 void setup() {
   ++bootCount;
-  heltec_setup();
+  heltec_setup();  // también enciende Vext (Ve): en el cableado 2 alimenta a los sensores
+#if CABLEADO == 2
+  delay(50);  // los sensores en Vext necesitan un momento para estabilizarse al despertar
+#endif
 #if !MOSTRAR_OLED
   heltec_display_power(false);
 #endif
@@ -158,6 +168,9 @@ void transmitSensorData() {
                    "|RainBool:" + (rainDigital ? "1" : "0") +
                    "|Nodo:" + String(NODE_ID) +
                    "|Seq:" + String(bootCount);
+#if LEER_BATERIA
+  message += "|Bat:" + num(heltec_vbat(), 2);  // voltaje de la batería (V)
+#endif
   if (errores.length() > 0) message += "|Err:" + errores;
 
 #if MOSTRAR_OLED

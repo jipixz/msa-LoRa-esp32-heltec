@@ -18,6 +18,15 @@ const int JITTER_MAX_S = 60;
 const int DRY = 3600;  // suelo completamente seco (o sensor al aire)
 const int WET = 1100;  // suelo saturado de agua
 
+// ---- Cableado ----
+// 1 = cableado actual: DS18B20 en GPIO1, lluvia digital en GPIO3, sensores alimentados de 3V3.
+// 2 = cableado nuevo (ver README, "Cableado 2"): DS18B20 en GPIO39, lluvia digital en GPIO40,
+//     VCC de los sensores en Ve (Vext: se apagan durante el sueño) y lectura de la batería
+//     (GPIO1 queda libre para VBAT). Cambia a 2 SOLO después de recablear la baquelita.
+#ifndef CABLEADO  // se puede forzar al compilar: -DCABLEADO=2
+#define CABLEADO 1
+#endif
+
 // ---- Energía ----
 // El shield V9 de 4×18650 en modo NORMAL se apaga si el consumo es muy bajo (deep sleep).
 // Con el switch en HOLD no hace falta nada; si tu shield no tiene HOLD, pon 1 para mantener

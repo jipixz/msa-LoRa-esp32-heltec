@@ -41,6 +41,29 @@ el gateway reenvía cada paquete por USB a una Raspberry Pi, donde
 - Alimentación: shield **V9 de 4×18650** con el switch en **HOLD** (en NORMAL se apaga solo
   cuando el nodo duerme). Si tu shield no tiene HOLD, activa `USAR_DUMMY_LOAD` en `config.h`.
 
+### Cableado 2 (recomendado para la baquelita)
+
+`config.h` → `CABLEADO`: **1** = cableado actual (tabla de arriba), **2** = este. Cambia a 2
+solo después de recablear; si flasheas el 2 con el cableado viejo, el DS18B20 y la lluvia
+digital no responderán (el resto sigue funcionando).
+
+| Señal | Cableado 1 (actual) | Cableado 2 | Motivo |
+|---|---|---|---|
+| DS18B20 datos (pull-up 4.7 kΩ a VCC) | GPIO1 | **GPIO39** | GPIO1 es VBAT_ADC: libre para leer la batería |
+| YL-83 salida digital | GPIO3 | **GPIO40** | GPIO3 es pin de arranque (strapping) |
+| VCC de HW-390, YL-83, DS18B20, BME280, BH1750 | 3V3 | **Ve** (Vext) | Vext se apaga en deep sleep: el HW-390 y el LED del módulo YL-83 dejan de consumir |
+| GND de todos los sensores | GND | GND | — |
+| HW-390 analógico | GPIO7 | GPIO7 | — |
+| YL-83 analógico | GPIO2 | GPIO2 | — |
+| I²C SDA / SCL | GPIO41 / 42 | GPIO41 / 42 | — |
+
+Con el cableado 2 el paquete agrega `Bat:3.91` (voltaje de la batería, V); el backend lo guarda
+como `bateria` y el panel muestra la columna "Batería" en la tabla de nodos.
+
+Pines que **no** se deben usar en la V3: 0 (botón), 1 (VBAT), 3/45/46 (arranque), 8–14 (LoRa),
+17/18/21 (OLED), 19/20 (USB), 35 (LED), 36 (Vext), 37 (control de VBAT). La prueba
+`tests/decisiones.test.mjs` revisa que el cableado 2 no los use.
+
 ## Configurar un nodo nuevo
 
 1. Calibra el sensor de humedad con `calibration/` (seco al aire y en suelo saturado) y copia
@@ -75,6 +98,7 @@ HS:45|T1:25.3|T2:26.1|P:1008|HA:80.2|Lux:18400|Rain:0|RainBool:0|Nodo:3|Seq:152[
 | `RainBool` | rainDigital | 1 = llueve, 0 = no |
 | `Nodo` | nodo | ID del nodo |
 | `Seq` | — | contador de ciclos (un salto = paquete perdido) |
+| `Bat` | bateria | V (solo con cableado 2) |
 | `Err` | — | sensores que fallaron en ese ciclo |
 
 - Sin unidades ni espacios: ~76 bytes, **≈2.5 s al aire** con SF12/BW250/CR4-8 (antes ~100
@@ -111,7 +135,7 @@ node tests/compilar.mjs                 # compila los 3 sketches (ARDUINO_CLI=ru
 
 ## Pendientes
 
-- Mover el DS18B20 fuera del GPIO1 y reportar el voltaje de batería.
+- Recablear la baquelita al cableado 2 y poner `CABLEADO 2` (batería y sensores apagados en el sueño).
 - Probar en campo el consumo del ciclo nuevo y el alcance con varios nodos.
 - Paquete binario y ACK con reintento (requiere cambiar receptor y backend a la vez).
 - Configuración por plantación/cultivo (umbrales y nodos por archivo), para usarlo con
