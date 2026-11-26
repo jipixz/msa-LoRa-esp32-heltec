@@ -23,6 +23,7 @@ el gateway reenvía cada paquete por USB a una Raspberry Pi, donde
 | `receptor/receiver/` | Gateway: recibe, reenvía una línea por paquete por Serial, resumen en OLED y LEDs. |
 | `calibration/humiditySensorCalibration/` | Muestra el valor crudo del HW-390 para obtener `DRY`/`WET`. |
 | `tests/` | Pruebas del firmware (`node --test`) y compilación de los 3 sketches. |
+| `herramientas/consola/` | Consola web en vivo del banco de pruebas: puertos serie (PC y Pi), logs del kernel y de Windows, y build/flasheo. |
 
 ## Hardware y pines (nodo)
 
@@ -69,7 +70,18 @@ Pines que **no** se deben usar en la V3: 0 (botón), 1 (VBAT), 3/45/46 (arranque
 1. Calibra el sensor de humedad con `calibration/` (seco al aire y en suelo saturado) y copia
    los valores a `DRY` y `WET` de `transmisor/sender/config.h`.
 2. Pon un `NODE_ID` único (0–255) en `config.h`.
-3. Compila y sube `transmisor/sender` a la placa del nodo.
+3. Elige el modo: `MODO_AHORRO 1` (campo: cada 30 min, OLED apagado) o `0` (instalación:
+   cada 60 s y cada lectura en el OLED).
+4. Compila y sube `transmisor/sender` a la placa del nodo.
+
+Al **encender** la placa (no al despertar), en cualquier modo:
+
+- El LED blanco hace la firma del firmware: nodo `· · · —` ×2, gateway `— —` ×2. El LED rojo
+  es el de carga de la batería: lo controla el hardware, no el firmware.
+- El OLED muestra nombre, versión, modo y cableado (`SEGUNDOS_INICIO`) y luego la revisión de
+  sensores en dos páginas (`SEGUNDOS_PAGINA` cada una): `OK` con su dirección I²C o `--` si
+  no respondió, y el valor crudo de los analógicos. También busca el BME280 en 0x76/0x77 y el
+  BH1750 en 0x23/0x5C, y lista cualquier otro dispositivo del bus I²C.
 
 ## Ciclo del nodo y energía
 
@@ -133,7 +145,20 @@ Arduino IDE 2 o `arduino-cli`, placa **`esp32:esp32:heltec_wifi_lora_32_V3`**.
 ```bash
 node --test tests/decisiones.test.mjs   # radio igual en emisor y receptor, protocolo, energía, calibración
 node tests/compilar.mjs                 # compila los 3 sketches (ARDUINO_CLI=ruta si no está en el PATH)
+node --test tests/consola.test.mjs      # analizador y puertos de la consola
 ```
+
+## Consola en vivo
+
+```bash
+MSA_PI=usuario@ip-de-la-pi node herramientas/consola/servidor.mjs   # http://localhost:4747
+node herramientas/consola/correr.mjs --tag flash -- arduino-cli upload ...   # el comando y su salida, en vivo
+```
+
+Solo lectura: muestra los puertos serie de la PC y de la Pi (qué chip USB hay detrás y qué
+proceso los tiene abiertos), el log del kernel de la Pi y las bitácoras System y Kernel-PnP
+de Windows con su nivel, y los datos del chip y del enlace LoRa que salen al flashear o al
+arrancar una placa. Sin dependencias: solo Node.js.
 
 ## Pendientes
 

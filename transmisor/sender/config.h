@@ -6,12 +6,25 @@
 // Único por nodo dentro de la finca (0–255). El backend lo guarda en el campo "nodo".
 const int NODE_ID = 0;
 
-// ---- Ciclo de trabajo ----
-// Cada cuánto despierta a medir y transmitir (segundos).
-const int INTERVALO_S = 1800;
-// Aleatorio que se SUMA al sueño (0..JITTER_MAX_S) para que varios nodos no transmitan a la
-// vez. Antes se esperaba despierto antes de transmitir; dormido cuesta casi nada.
-const int JITTER_MAX_S = 60;
+// ---- Modo ----
+// 1 = AHORRO (campo): mide cada 30 min y el OLED se queda apagado (solo se ve al encender).
+// 0 = PRUEBA (instalación): mide cada 60 s y muestra cada lectura en el OLED a brillo máximo.
+#ifndef MODO_AHORRO  // se puede forzar al compilar: -DMODO_AHORRO=0
+#define MODO_AHORRO 1
+#endif
+
+#if MODO_AHORRO
+const int INTERVALO_S = 1800;  // cada cuánto despierta a medir y transmitir (s)
+const int JITTER_MAX_S = 60;   // aleatorio que se SUMA al sueño para que los nodos no choquen
+#define MOSTRAR_OLED 0         // lecturas en el OLED en cada ciclo
+#else
+const int INTERVALO_S = 60;
+const int JITTER_MAX_S = 5;
+#define MOSTRAR_OLED 1
+#endif
+
+// Versión del firmware: aparece en el OLED y por Serial al encender la placa
+#define FIRMWARE_VERSION "2026.11.25"
 
 // ---- Calibración del sensor de humedad de suelo (HW-390) ----
 // Valores crudos del ADC: usa calibration/humiditySensorCalibration para medirlos.
@@ -34,5 +47,7 @@ const int WET = 1100;  // suelo saturado de agua
 #define USAR_DUMMY_LOAD 0
 const int DUMMY_LOAD_PIN = 48;
 
-// Mostrar las lecturas en el OLED (útil al instalar; en campo puede ir en 0 para ahorrar).
-#define MOSTRAR_OLED 1
+// Al encender la placa (no al despertar) se muestra, también en modo ahorro, el arranque y
+// luego la revisión de sensores en dos páginas: sirve para comprobar la instalación.
+const int SEGUNDOS_INICIO = 3;   // nombre, versión y modo
+const int SEGUNDOS_PAGINA = 2;   // cada página de sensores (1/2 digitales, 2/2 analógicos)

@@ -44,6 +44,17 @@ int cambiosPendientes = 0;          // cada parpadeo son 2 cambios (encender y a
 unsigned long ultimoCambio = 0;
 bool alertaTemperatura = false;
 
+#define FIRMWARE_VERSION "2026.11.25"
+
+// Firma de arranque en el LED blanco: 2 largos, dos veces (— —  — —). El nodo hace · · · —.
+void firmaLed() {
+  pinMode(LED_BLANCO, OUTPUT);
+  for (int r = 0; r < 2; r++) {
+    for (int i = 0; i < 2; i++) { digitalWrite(LED_BLANCO, HIGH); delay(600); digitalWrite(LED_BLANCO, LOW); delay(250); }
+    delay(500);
+  }
+}
+
 void setup() {
   // En la V3 el OLED se alimenta de Vext (GPIO36) y heltec_setup() solo lo enciende en el
   // Wireless Stick: sin esto la pantalla vive de la corriente que se cuela por sus pines y se
@@ -51,6 +62,7 @@ void setup() {
   heltec_ve(true);
   delay(50);
   heltec_setup();
+  firmaLed();
 
   // LEDs
   pinMode(LED_NARANJA, OUTPUT);
@@ -76,7 +88,10 @@ void setup() {
   radio.setDio1Action(rxCallback);
   RADIOLIB_OR_HALT(radio.startReceive());
 
-  both.println("Receptor listo. Esperando datos...");
+  // Líneas cortas: el OLED muestra ~21 caracteres por renglón
+  both.printf("AgroMonitor gateway\nfw %s\n", FIRMWARE_VERSION);
+  both.println("Receptor listo");
+  both.println("Esperando datos...");
 }
 
 void loop() {

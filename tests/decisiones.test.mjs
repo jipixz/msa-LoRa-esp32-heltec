@@ -60,7 +60,7 @@ test("emisor: NODE_ID definido", () => {
 })
 
 test("emisor: si falla el BME280 ya no se duerme sin transmitir", () => {
-  const ini = emisor.indexOf("bmeOk = bme.begin"), fin = emisor.indexOf("// 3. BH1750")
+  const ini = emisor.indexOf("bme.begin(0x76"), fin = emisor.indexOf("// 3. BH1750")
   assert.ok(ini >= 0 && fin > ini, "no se encontró la inicialización del BME280 con bmeOk")
   assert.doesNotMatch(emisor.slice(ini, fin), /goToDeepSleep\(\)/)
 })
@@ -131,4 +131,42 @@ test("Vext se enciende antes de heltec_setup en ambos sketches (OLED a brillo no
   for (const [nombre, codigo] of [["emisor", emisor], ["receptor", receptor]]) {
     assert.match(codigo, /heltec_ve\(true\);\s*delay\(\d+\);[^\n]*\s*heltec_setup\(\);/, nombre)
   }
+})
+
+test("modo ahorro por defecto en el repo: 30 min y OLED apagado; prueba: 60 s con OLED", () => {
+  const cfg = leer("transmisor/sender/config.h")
+  assert.match(cfg, /#define MODO_AHORRO 1/)
+  assert.match(cfg, /#if MODO_AHORRO\s+const int INTERVALO_S = 1800;[\s\S]*#define MOSTRAR_OLED 0[\s\S]*#else\s+const int INTERVALO_S = 60;[\s\S]*#define MOSTRAR_OLED 1/)
+})
+
+test("firma de arranque: el nodo y el gateway parpadean distinto en el LED blanco (GPIO35)", () => {
+  for (const codigo of [emisor, receptor]) {
+    assert.match(codigo, /LED_BLANCO = 35/)
+    assert.match(codigo, /void firmaLed\(\)/)
+  }
+  // Solo al encender (no en cada despertar) para no gastar batería
+  assert.match(emisor, /const bool arranque = esp_sleep_get_wakeup_cause\(\) != ESP_SLEEP_WAKEUP_TIMER;[\s\S]*?if \(arranque\) \{\s*firmaLed\(\);/)
+})
+
+test("los mensajes de arranque del gateway caben en el OLED (≤ 21 caracteres por renglón)", () => {
+  for (const m of receptor.matchAll(/both\.println\("([^"]*)"\)/g)) assert.ok(m[1].length <= 21, m[1])
+})
+
+test("pantallas de arranque del nodo: cada renglón cabe en el OLED y cada página tiene ≤ 6", () => {
+  const ini = emisor.indexOf("void revisarSensores()"), fin = emisor.indexOf("void loop()")
+  const paginas = emisor.slice(ini, fin).split("display.cls();").slice(1, 3)
+  assert.equal(paginas.length, 2)
+  for (const pg of paginas) {
+    const renglones = new Set([...pg.matchAll(/both\.print(?:ln|f)\("([^"]*)/g)].map((m) => m[1].replace(/\\n$/, "")))
+    // BME/BH1750/DS18B20 tienen dos variantes (OK / --) pero ocupan un renglón cada uno
+    const ocupados = [...renglones].filter((r) => !r.endsWith("--") && !r.startsWith("DS18B20 --")).length
+    assert.ok(ocupados <= 6, `${ocupados} renglones`)
+    for (const r of renglones) {
+      // los formatos se reemplazan por su ancho máximo
+      const ancho = r.replace(/%02X/g, "XX").replace(/%\.2f/g, "4.20").replace(/%d/g, "4095").length
+      assert.ok(ancho <= 21, `"${r}" mide ${ancho}`)
+    }
+  }
+  // "otros I2C: " + direcciones también cuenta: con hasta 3 direcciones cabe
+  assert.ok("otros I2C: 5c 77 3c ".length <= 21)
 })

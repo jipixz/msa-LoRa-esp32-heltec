@@ -9,9 +9,11 @@
 #include <DallasTemperature.h>
 #include <BH1750.h>
 #include "driver/gpio.h"
+#include "esp_log.h"
 #include "config.h"
 
-// Configuración de pines
+// Configuración de pines (Heltec V3, ver README: header J2/J3)
+const int LED_BLANCO = 35;    // único LED programable de la placa (el rojo es el de carga)
 const int sensorPin = 7;      // GPIO7 - Entrada analógica del sensor HW-390
 #if CABLEADO == 2
 const int ds18b20Pin = 39;    // GPIO39 - DS18B20 (cableado 2: GPIO1 queda para leer la batería)
@@ -35,6 +37,8 @@ RTC_DATA_ATTR uint32_t bootCount = 0;
 bool bmeOk = false;
 bool dsOk = false;
 bool luxOk = false;
+uint8_t bmeDir = 0;   // dirección I²C en la que respondió el BME280 (0x76 o 0x77)
+uint8_t luxDir = 0;   // dirección I²C en la que respondió el BH1750 (0x23 o 0x5C)
 
 TwoWire I2CBME = TwoWire(1);
 Adafruit_BME280 bme;
@@ -50,11 +54,25 @@ void setup() {
   heltec_ve(true);
   delay(50);  // que el OLED y los sensores se estabilicen
   heltec_setup();
-#if !MOSTRAR_OLED
-  heltec_display_power(false);
-#endif
 
-  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+  // Encendido (no despertar del sueño): firma de LED, versión y revisión de sensores
+  const bool arranque = esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER;
+  // El driver I²C llena el Serial de errores cuando un sensor no responde: eso ya lo dice la
+  // revisión de sensores y el campo Err del paquete.
+  esp_log_level_set("i2c.master", ESP_LOG_NONE);
+  if (arranque) {
+    firmaLed();
+    display.cls();
+    both.printf("AgroMonitor nodo %d\n", NODE_ID);
+    both.printf("fw %s\n", FIRMWARE_VERSION);
+    both.printf("modo %s\n", MODO_AHORRO ? "AHORRO 30 min" : "PRUEBA 60 s");
+    both.printf("cableado %d\n", CABLEADO);
+    delay(SEGUNDOS_INICIO * 1000);
+  }
+#if !MOSTRAR_OLED
+  if (!arranque) heltec_display_power(false);
+#endif
+  if (!arranque) {
     both.printf("Nodo %d · ciclo #%lu\n", NODE_ID, (unsigned long)bootCount);
   }
 
@@ -65,33 +83,32 @@ void setup() {
 
   // 2. BME280 en modo forzado: mide solo cuando se le pide y vuelve a dormir.
   // Si falla no se detiene el nodo: se transmite el resto de los datos.
-  bmeOk = bme.begin(0x76, &I2CBME);
-  if (!bmeOk) {
-    both.println("Error BME280! Verificar:");
-    both.println("1. Dirección 0x76/0x77");
-    both.println("2. Cableado SDA/SCL");
-  } else {
+  // (algunos módulos vienen en 0x77 en vez de 0x76: se prueban las dos)
+  if (bme.begin(0x76, &I2CBME)) bmeDir = 0x76;
+  else if (bme.begin(0x77, &I2CBME)) bmeDir = 0x77;
+  bmeOk = bmeDir != 0;
+  if (bmeOk) {
     bme.setSampling(Adafruit_BME280::MODE_FORCED,
                     Adafruit_BME280::SAMPLING_X1, Adafruit_BME280::SAMPLING_X1, Adafruit_BME280::SAMPLING_X1,
                     Adafruit_BME280::FILTER_OFF);
   }
 
   // 3. BH1750 en una sola medición: se apaga solo después de medir.
-  luxOk = lightMeter.begin(BH1750::ONE_TIME_HIGH_RES_MODE, 0x23, &I2CBME);
+  // (0x23 con ADDR a GND o al aire; 0x5C con ADDR a VCC)
+  if (lightMeter.begin(BH1750::ONE_TIME_HIGH_RES_MODE, 0x23, &I2CBME)) luxDir = 0x23;
+  else if (lightMeter.begin(BH1750::ONE_TIME_HIGH_RES_MODE, 0x5C, &I2CBME)) luxDir = 0x5C;
+  luxOk = luxDir != 0;
 
   // 4. DS18B20
   pinMode(ds18b20Pin, INPUT_PULLUP);
   ds18b20.begin();
   dsOk = ds18b20.getDS18Count() > 0;
-  if (!dsOk) {
-    both.println("Error DS18B20! Verificar:");
-    both.println("1. Resistencia pull-up 4.7kΩ");
-    both.println("2. Cableado GPIO1");
-  }
 
   // 5. Humedad de suelo y lluvia
   pinMode(sensorPin, INPUT);
   pinMode(rainDigitalPin, INPUT_PULLUP);
+
+  if (arranque) revisarSensores();
 
   // Radio LoRa: estos parámetros deben coincidir con el receptor (lo revisa tests/decisiones.test.mjs)
   RADIOLIB_OR_HALT(radio.begin());
@@ -107,6 +124,50 @@ void setup() {
   // Se transmite de inmediato; el aleatorio anticolisión va en el tiempo de sueño
   transmitSensorData();
   dormir();
+}
+
+// Firma de arranque en el LED blanco: 3 cortos + 1 largo, dos veces (· · · —  · · · —).
+// Si la ves al conectar la placa, tiene este firmware de nodo. (El receptor hace 2 largos.)
+void firmaLed() {
+  pinMode(LED_BLANCO, OUTPUT);
+  for (int r = 0; r < 2; r++) {
+    for (int i = 0; i < 3; i++) { digitalWrite(LED_BLANCO, HIGH); delay(120); digitalWrite(LED_BLANCO, LOW); delay(150); }
+    digitalWrite(LED_BLANCO, HIGH); delay(600); digitalWrite(LED_BLANCO, LOW); delay(500);
+  }
+}
+
+// Qué sensores responden y en qué pin: en el OLED (dos páginas de máximo 6 renglones de 21
+// caracteres) y por Serial, al encender la placa.
+// Los analógicos (HW-390, YL-83) siempre "responden": se muestra el valor crudo del ADC;
+// ~0 o ~4095 suele ser un pin al aire o sin alimentación (el YL-83 seco también da ~4095).
+void revisarSensores() {
+  // Otros dispositivos en el bus I²C (por si un sensor tiene otra dirección)
+  String otros = "";
+  for (uint8_t a = 0x08; a < 0x78; a++) {
+    if (a == bmeDir || a == luxDir) continue;
+    I2CBME.beginTransmission(a);
+    if (I2CBME.endTransmission() == 0) otros += String(a, HEX) + " ";
+  }
+
+  display.cls();
+  both.println("Sensores 1/2");
+  both.printf("I2C SDA%d SCL%d\n", sdaPin, sclPin);
+  if (bmeOk) both.printf("BME280  OK 0x%02X\n", bmeDir); else both.println("BME280  --");
+  if (luxOk) both.printf("BH1750  OK 0x%02X\n", luxDir); else both.println("BH1750  --");
+  if (dsOk) both.printf("DS18B20 OK GPIO%d\n", ds18b20Pin); else both.printf("DS18B20 -- GPIO%d\n", ds18b20Pin);
+  if (otros.length()) both.println("otros I2C: " + otros);
+  delay(SEGUNDOS_PAGINA * 1000);
+
+  display.cls();
+  both.println("Sensores 2/2");
+  both.printf("Suelo ADC %d G%d\n", analogRead(sensorPin), sensorPin);
+  both.printf("Lluvia ADC %d G%d\n", analogRead(rainAnalogPin), rainAnalogPin);
+  both.printf("Lluvia dig %d G%d\n", digitalRead(rainDigitalPin), rainDigitalPin);
+#if LEER_BATERIA
+  both.printf("Bateria %.2f V\n", heltec_vbat());
+#endif
+  delay(SEGUNDOS_PAGINA * 1000);
+  display.cls();
 }
 
 void loop() {
