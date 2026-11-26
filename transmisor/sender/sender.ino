@@ -207,7 +207,9 @@ void transmitSensorData() {
   }
 
   int rainAnalog = analogRead(rainAnalogPin);
-  bool rainDigital = digitalRead(rainDigitalPin);
+  // D0 del YL-83 es activa en BAJO: su comparador (LM393) la pone en LOW cuando la placa se
+  // moja (el LED del módulo se enciende). Desconectada, el pull-up la deja en HIGH = no llueve.
+  bool rainDigital = digitalRead(rainDigitalPin) == LOW;
   int rainPercent = constrain(map(rainAnalog, 4095, 0, 0, 100), 0, 100);
 
   // Sensores que fallaron en este ciclo (el backend ignora claves que no conoce)

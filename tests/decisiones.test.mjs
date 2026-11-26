@@ -170,3 +170,7 @@ test("pantallas de arranque del nodo: cada renglón cabe en el OLED y cada pági
   // "otros I2C: " + direcciones también cuenta: con hasta 3 direcciones cabe
   assert.ok("otros I2C: 5c 77 3c ".length <= 21)
 })
+
+test("lluvia digital: D0 del YL-83 es activa en bajo (LOW = mojado = RainBool 1)", () => {
+  assert.match(emisor, /bool rainDigital = digitalRead\(rainDigitalPin\) == LOW;/)
+})
