@@ -44,10 +44,12 @@ DallasTemperature ds18b20(&oneWire);
 
 void setup() {
   ++bootCount;
-  heltec_setup();  // también enciende Vext (Ve): en el cableado 2 alimenta a los sensores
-#if CABLEADO == 2
-  delay(50);  // los sensores en Vext necesitan un momento para estabilizarse al despertar
-#endif
+  // Vext (Ve, GPIO36) alimenta el OLED y, en el cableado 2, los sensores. heltec_setup() no lo
+  // enciende en la V3 (solo en el Wireless Stick): sin esto el OLED se ve tenue y los sensores
+  // en Ve quedarían sin corriente. heltec_deep_sleep() lo apaga al dormir.
+  heltec_ve(true);
+  delay(50);  // que el OLED y los sensores se estabilicen
+  heltec_setup();
 #if !MOSTRAR_OLED
   heltec_display_power(false);
 #endif

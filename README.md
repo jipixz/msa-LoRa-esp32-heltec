@@ -78,6 +78,8 @@ Pines que **no** se deben usar en la V3: 0 (botón), 1 (VBAT), 3/45/46 (arranque
 2. Duerme `INTERVALO_S` (30 min) **más** un aleatorio de 0–`JITTER_MAX_S` s para que varios
    nodos no transmitan a la vez. El aleatorio se duerme, no se espera despierto.
 3. `heltec_deep_sleep()` apaga correctamente el OLED, Vext y la radio.
+   Al despertar se enciende Vext a mano antes de `heltec_setup()`: la librería solo lo hace en
+   el Wireless Stick, y sin él el OLED de la V3 se ve tenue (y los sensores en Ve no tendrían corriente).
 4. Si un sensor falla, el paquete sale igual con `nan` en ese campo y `Err:` con su nombre.
 
 ## Protocolo (una línea por paquete)

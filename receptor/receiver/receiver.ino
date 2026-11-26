@@ -45,6 +45,11 @@ unsigned long ultimoCambio = 0;
 bool alertaTemperatura = false;
 
 void setup() {
+  // En la V3 el OLED se alimenta de Vext (GPIO36) y heltec_setup() solo lo enciende en el
+  // Wireless Stick: sin esto la pantalla vive de la corriente que se cuela por sus pines y se
+  // ve tenue. Se enciende primero y se espera a que se estabilice antes de inicializarla.
+  heltec_ve(true);
+  delay(50);
   heltec_setup();
 
   // LEDs

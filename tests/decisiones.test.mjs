@@ -125,3 +125,10 @@ test("cableado 2: lee la batería y la manda como Bat (en el cableado 1 no, GPIO
   assert.match(emisor, /#if CABLEADO == 2[\s\S]*#define LEER_BATERIA 1[\s\S]*#else[\s\S]*#define LEER_BATERIA 0/)
   assert.match(emisor, /"\|Bat:" \+ num\(heltec_vbat\(\), 2\)/)
 })
+
+test("Vext se enciende antes de heltec_setup en ambos sketches (OLED a brillo normal, sensores en Ve)", () => {
+  // heltec_unofficial solo enciende Vext en el Wireless Stick; en la V3 hay que hacerlo a mano
+  for (const [nombre, codigo] of [["emisor", emisor], ["receptor", receptor]]) {
+    assert.match(codigo, /heltec_ve\(true\);\s*delay\(\d+\);[^\n]*\s*heltec_setup\(\);/, nombre)
+  }
+})
